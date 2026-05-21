@@ -5,13 +5,17 @@ from pathlib import Path
 import torch
 from torch_geometric.utils import to_undirected
 
-TWITCH_LANG: str = "PT"
-VICTIM_RATIO: float = 0.4 # 受害者比例
-FOLLOWERS_PER_VICTIM: int = 50 # 每个受害者跟随者数量
-ATTACK_SEED: int = 42 
+TWITCH_LANG: str = "EN"
+VICTIM_RATIO: float = 0.2
+FOLLOWERS_PER_VICTIM: int | None = None
+MAX_FOLLOWERS_AT_FULL_BUDGET: int = 30
+INJECTED_EDGE_BUDGET_RATIO: float = 1
+VICTIM_SELECTION: str = "random"
+ATTACK_SEED: int = 42
 FOLLOWER_INTRA_RING: bool = True # 组内连边
-FOLLOWER_INTRA_RANDOM_PAIR_COUNT: int = 100 # 组内连边数
-BOT_FEATURE_STD: float = 0.01 # 水军特征高斯扰动幅度
+FOLLOWER_INTRA_RANDOM_PAIR_COUNT: int = 100
+BOT_FEATURE_STD: float = 0.05 # 水军特征高斯扰动幅度
+ATTACK_SPLITS: tuple[str, ...] = ("train", "val", "test")
 
 
 def project_root() -> Path:
@@ -22,8 +26,12 @@ def clean_twitch_dir(lang: str) -> Path:
     return project_root() / "dataset" / "clean" / f"twitch_{lang}"
 
 
-def poisoned_twitch_dir(lang: str) -> Path:
-    return project_root() / "dataset" / "poisoned" / f"twitch_{lang}"
+def poisoned_twitch_dir(lang: str, budget_ratio: float | None = None) -> Path:
+    base = project_root() / "dataset" / "poisoned" / f"twitch_{lang}"
+    if budget_ratio is None:
+        return base
+    tag = f"budget_{budget_ratio:.4f}".replace(".", "p")
+    return base / tag
 
 
 def load_clean_data(lang: str) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]:
@@ -66,6 +74,101 @@ def _intra_follower_edge_blocks(
     return blocks
 
 
+def _node_degrees(edge_index: torch.Tensor, num_nodes: int, device: torch.device) -> torch.Tensor:
+    deg = torch.zeros(num_nodes, dtype=torch.long, device=device)
+    ones = torch.ones(edge_index.size(1), dtype=torch.long, device=device)
+    deg.scatter_add_(0, edge_index[0], ones)
+    deg.scatter_add_(0, edge_index[1], ones)
+    return deg
+
+
+def _select_victims(
+    candidate_nodes: torch.Tensor,
+    victim_count: int,
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    victim_selection: str,
+    generator: torch.Generator,
+    device: torch.device,
+) -> torch.Tensor:
+    if victim_count >= candidate_nodes.numel():
+        return candidate_nodes
+    if victim_selection == "low_degree":
+        deg = _node_degrees(edge_index, num_nodes, device)
+        victim_deg = deg[candidate_nodes].float()
+        order = torch.argsort(victim_deg)
+        return candidate_nodes[order[:victim_count]]
+    perm = torch.randperm(candidate_nodes.numel(), generator=generator, device=device)
+    return candidate_nodes[perm[:victim_count]]
+
+
+def _followers_per_victim_from_budget(
+    injected_edge_budget_ratio: float,
+    followers_per_victim: int | None,
+    max_followers_at_full_budget: int = MAX_FOLLOWERS_AT_FULL_BUDGET,
+) -> int:
+    if followers_per_victim is not None and followers_per_victim > 0:
+        return followers_per_victim
+    ratio = min(1.0, max(0.0, injected_edge_budget_ratio))
+    return max(1, int(round(max_followers_at_full_budget * ratio)))
+
+
+def _attack_nodes_from_splits(
+    train_mask: torch.Tensor,
+    val_mask: torch.Tensor,
+    test_mask: torch.Tensor,
+    attack_splits: tuple[str, ...],
+    device: torch.device,
+) -> torch.Tensor:
+    split_map = {
+        "train": train_mask,
+        "val": val_mask,
+        "test": test_mask,
+    }
+    selected = []
+    for split in attack_splits:
+        key = split.strip().lower()
+        if key not in split_map:
+            raise ValueError(f"Unknown attack split: {split}")
+        selected.append(split_map[key].to(device).bool())
+    merged = torch.stack(selected, dim=0).any(dim=0)
+    return merged.nonzero(as_tuple=False).view(-1)
+
+
+def _sample_bot_features(
+    x: torch.Tensor,
+    y_flat: torch.Tensor,
+    num_nodes: int,
+    bot_label: int,
+    count: int,
+    victim_feat: torch.Tensor,
+    generator: torch.Generator,
+    device: torch.device,
+    bot_feature_std: float,
+) -> torch.Tensor:
+    pool = (y_flat[:num_nodes] == bot_label).nonzero(as_tuple=False).view(-1)
+    if pool.numel() == 0:
+        pool = torch.arange(num_nodes, device=device)
+    if pool.numel() >= count:
+        perm = torch.randperm(pool.numel(), generator=generator, device=device)[:count]
+        proto_idx = pool[perm]
+    else:
+        proto_idx = pool[
+            torch.randint(0, pool.numel(), (count,), generator=generator, device=device)
+        ]
+    feats = x[proto_idx].clone()
+    victim_feat = victim_feat.view(1, -1).to(device=device, dtype=feats.dtype)
+    feats = 0.7 * feats + 0.3 * victim_feat
+    if bot_feature_std > 0:
+        feats = feats + torch.randn(
+            feats.shape,
+            generator=generator,
+            device=device,
+            dtype=feats.dtype,
+        ) * bot_feature_std
+    return feats
+
+
 def inject_topology_attack(
     x: torch.Tensor,
     edge_index: torch.Tensor,
@@ -75,16 +178,21 @@ def inject_topology_attack(
     y: torch.Tensor,
     num_nodes: int,
     victim_ratio: float,
-    followers_per_victim: int,
+    followers_per_victim: int | None,
     seed: int,
     follower_intra_ring: bool,
     follower_intra_random_pair_count: int,
     bot_feature_std: float,
+    attack_splits: tuple[str, ...],
+    injected_edge_budget_ratio: float = 1,
+    victim_selection: str = "low_degree",
 ) -> dict[str, torch.Tensor]:
     if victim_ratio <= 0 or victim_ratio > 1:
         raise ValueError("victim_ratio must be in (0, 1].")
-    if followers_per_victim <= 0:
-        raise ValueError("followers_per_victim must be positive.")
+    if injected_edge_budget_ratio <= 0:
+        raise ValueError("injected_edge_budget_ratio must be positive.")
+    if victim_selection not in {"random", "low_degree"}:
+        raise ValueError("victim_selection must be 'random' or 'low_degree'.")
 
     device = edge_index.device
     x = x.to(device)
@@ -94,19 +202,37 @@ def inject_topology_attack(
     num_classes = int(y_flat.max().item()) + 1
 
     generator = torch.Generator(device=device).manual_seed(seed)
-    test_nodes = test_mask.nonzero(as_tuple=False).view(-1).to(device)
-    victim_count = max(1, int(test_nodes.numel() * victim_ratio))
-    victim_perm = torch.randperm(test_nodes.numel(), generator=generator, device=device)
-    victims = test_nodes[victim_perm[:victim_count]]
+    candidate_nodes = _attack_nodes_from_splits(
+        train_mask,
+        val_mask,
+        test_mask,
+        attack_splits,
+        device,
+    )
+    victim_count = max(1, int(candidate_nodes.numel() * victim_ratio))
+    victims = _select_victims(
+        candidate_nodes,
+        victim_count,
+        edge_index,
+        num_nodes,
+        victim_selection,
+        generator,
+        device,
+    )
+    k_per_victim = _followers_per_victim_from_budget(
+        injected_edge_budget_ratio,
+        followers_per_victim,
+    )
     injected_blocks: list[torch.Tensor] = []
+    victim_bot_blocks: list[torch.Tensor] = []
+    bot_bot_blocks: list[torch.Tensor] = []
     new_x_rows: list[torch.Tensor] = []
     new_y_rows: list[torch.Tensor] = []
     next_new_id = num_nodes
-    feat_dim = int(x.size(1))
 
     for victim in victims:
         victim = victim.view(()).long()
-        k = followers_per_victim
+        k = k_per_victim
         bot_ids = torch.arange(
             next_new_id,
             next_new_id + k,
@@ -119,42 +245,52 @@ def inject_topology_attack(
             bot_label = 1 - vl
         else:
             bot_label = (vl + 1) % num_classes
-            
-        target_class_indices = (y_flat[:num_nodes] == bot_label).nonzero(as_tuple=False).view(-1)
-        
-        sampled_indices = target_class_indices[
-            torch.randint(
-                0, 
-                target_class_indices.numel(), 
-                (k,), 
-                generator=generator, 
-                device=device
-            )
-        ]
-        
-        bot_features = x[sampled_indices].clone()
+
+        bot_features = _sample_bot_features(
+            x,
+            y_flat,
+            num_nodes,
+            bot_label,
+            k,
+            x[victim],
+            generator,
+            device,
+            bot_feature_std,
+        )
         new_x_rows.append(bot_features)
-        
         new_y_rows.append(torch.full((k,), bot_label, device=device, dtype=torch.long))
 
         victim_nodes = victim.expand(k)
-        injected_blocks.append(torch.stack([victim_nodes, bot_ids], dim=0))
-        injected_blocks.extend(
-            _intra_follower_edge_blocks(
-                bot_ids,
-                generator,
-                device,
-                follower_intra_ring,
-                follower_intra_random_pair_count,
-            )
+        victim_bot_edges = torch.stack([victim_nodes, bot_ids], dim=0)
+        intra_pairs = min(
+            follower_intra_random_pair_count,
+            max(0, k * (k - 1) // 2),
         )
+        bot_bot_edges = _intra_follower_edge_blocks(
+            bot_ids,
+            generator,
+            device,
+            follower_intra_ring,
+            intra_pairs,
+        )
+        injected_blocks.append(victim_bot_edges)
+        injected_blocks.extend(bot_bot_edges)
+        victim_bot_blocks.append(victim_bot_edges)
+        bot_bot_blocks.extend(bot_bot_edges)
 
     if not injected_blocks:
         injected_edge_index = torch.empty((2, 0), dtype=torch.long, device=device)
+        victim_bot_edge_index = torch.empty((2, 0), dtype=torch.long, device=device)
+        bot_bot_edge_index = torch.empty((2, 0), dtype=torch.long, device=device)
         x_poison = x
         y_poison = y_flat
     else:
         injected_edge_index = torch.cat(injected_blocks, dim=1)
+        victim_bot_edge_index = torch.cat(victim_bot_blocks, dim=1)
+        if bot_bot_blocks:
+            bot_bot_edge_index = torch.cat(bot_bot_blocks, dim=1)
+        else:
+            bot_bot_edge_index = torch.empty((2, 0), dtype=torch.long, device=device)
         x_poison = torch.cat([x] + new_x_rows, dim=0)
         y_poison = torch.cat([y_flat] + new_y_rows, dim=0)
 
@@ -171,12 +307,19 @@ def inject_topology_attack(
     return {
         "edge_index": poisoned_edge_index,
         "injected_edge_index": injected_edge_index,
+        "victim_bot_edge_index": victim_bot_edge_index,
+        "bot_bot_edge_index": bot_bot_edge_index,
         "victims": victims,
         "x": x_poison,
         "y": y_poison,
         "train_mask": train_ext,
         "val_mask": val_ext,
         "test_mask": test_ext,
+        "num_original_nodes": num_nodes,
+        "followers_per_victim": k_per_victim,
+        "injected_edge_budget_ratio": injected_edge_budget_ratio,
+        "victim_selection": victim_selection,
+        "max_followers_at_full_budget": MAX_FOLLOWERS_AT_FULL_BUDGET,
     }
 
 
@@ -205,9 +348,12 @@ def main() -> int:
         follower_intra_ring=FOLLOWER_INTRA_RING,
         follower_intra_random_pair_count=FOLLOWER_INTRA_RANDOM_PAIR_COUNT,
         bot_feature_std=BOT_FEATURE_STD,
+        attack_splits=ATTACK_SPLITS,
+        injected_edge_budget_ratio=INJECTED_EDGE_BUDGET_RATIO,
+        victim_selection=VICTIM_SELECTION,
     )
 
-    out_dir = poisoned_twitch_dir(lang)
+    out_dir = poisoned_twitch_dir(lang, INJECTED_EDGE_BUDGET_RATIO)
     out_dir.mkdir(parents=True, exist_ok=True)
     graph_path = out_dir / "poisoned_graph.pt"
     edge_only_path = out_dir / "poisoned_edge_index.pt"
@@ -219,20 +365,35 @@ def main() -> int:
             "lang": lang,
             "seed": ATTACK_SEED,
             "victim_ratio": VICTIM_RATIO,
-            "followers_per_victim": FOLLOWERS_PER_VICTIM,
+            "followers_per_victim": bundle.get("followers_per_victim", FOLLOWERS_PER_VICTIM),
+            "injected_edge_budget_ratio": bundle.get(
+                "injected_edge_budget_ratio",
+                INJECTED_EDGE_BUDGET_RATIO,
+            ),
+            "victim_selection": bundle.get("victim_selection", VICTIM_SELECTION),
+            "max_followers_at_full_budget": bundle.get(
+                "max_followers_at_full_budget",
+                MAX_FOLLOWERS_AT_FULL_BUDGET,
+            ),
             "follower_intra_ring": FOLLOWER_INTRA_RING,
             "follower_intra_random_pair_count": FOLLOWER_INTRA_RANDOM_PAIR_COUNT,
-            "attack_mode": "new_node_cross_label_intra",
+            "attack_mode": "new_node_cross_label_intra_blend",
             "num_original_nodes": num_nodes,
             "num_bot_nodes": int(bundle["x"].size(0)) - num_nodes,
             "bot_feature_std": BOT_FEATURE_STD,
+            "attack_splits": ATTACK_SPLITS,
             "victims": bundle["victims"],
             "injected_edge_index": bundle["injected_edge_index"],
+            "victim_bot_edge_index": bundle["victim_bot_edge_index"],
+            "bot_bot_edge_index": bundle["bot_bot_edge_index"],
         },
         meta_path,
     )
 
     print(f"Language: {lang}")
+    print(f"Budget ratio: {INJECTED_EDGE_BUDGET_RATIO}")
+    print(f"Followers per victim: {bundle.get('followers_per_victim')}")
+    print(f"Victim selection: {VICTIM_SELECTION}")
     print(f"Victims: {int(bundle['victims'].numel())}")
     print(f"Bot nodes added: {int(bundle['x'].size(0)) - num_nodes}")
     print(f"Injected directed edges: {int(bundle['injected_edge_index'].size(1))}")

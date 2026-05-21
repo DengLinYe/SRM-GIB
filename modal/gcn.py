@@ -12,15 +12,17 @@ class VanillaGCN(nn.Module):
         in_channels: int,
         hidden_channels: int,
         out_channels: int,
-        dropout: float = 0.5,
+        dropout: float = 0.3,
     ) -> None:
         super().__init__()
         self.conv1 = GCNConv(in_channels, hidden_channels)
+        self.bn1 = nn.BatchNorm1d(hidden_channels)
         self.conv2 = GCNConv(hidden_channels, out_channels)
         self.dropout = dropout
 
     def forward(self, x: torch.Tensor, edge_index: torch.Tensor) -> torch.Tensor:
         x = self.conv1(x, edge_index)
+        x = self.bn1(x)
         x = F.relu(x)
         x = F.dropout(x, p=self.dropout, training=self.training)
         return self.conv2(x, edge_index)

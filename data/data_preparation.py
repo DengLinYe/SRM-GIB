@@ -22,7 +22,7 @@ LANG_TO_SNAP_FOLDER: dict[str, str] = {
 }
 
 
-TWITCH_LANG: str = "PT"     # 所选语言子图
+TWITCH_LANG: str = "EN"     # 所选语言子图
 TRAIN_RATIO: float = 0.1    # 训练集比例
 VAL_RATIO: float = 0.2      # 验证集比例
 SPLIT_SEED: int = 42        # 随机种子
