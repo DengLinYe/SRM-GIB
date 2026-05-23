@@ -27,13 +27,16 @@ def main() -> int:
     clean_model = train_gcn(clean_tensors, device, "clean", **gcn_kw)
     clean_test = evaluate_gcn(clean_model, clean_tensors, device)["test"]
 
-    print("=== GCN attack budget curve (original-node test) ===")
+    print("=== GCN bot-budget curve (original-node test) ===")
     print(f"GCN profile: hidden={ATTACK_CURVE_HIDDEN}, class_weights={ATTACK_CURVE_USE_CLASS_WEIGHTS}")
     print(f"Language: {lang} | clean_test={clean_test:.4f}")
-    print(f"{'Budget':>8} {'k/victim':>10} {'bots':>8} {'inj_edges':>12} {'poison_test':>12} {'drop':>8}")
+    print(
+        f"{'BotBudget':>9} {'k/victim':>10} {'bots':>8} "
+        f"{'inj_edges':>12} {'poison_test':>12} {'drop':>8}"
+    )
 
     for ratio in ATTACK_BUDGET_RATIOS:
-        bundle = build_or_load_poison_bundle(clean_tensors, lang, injected_edge_budget_ratio=ratio)
+        bundle = build_or_load_poison_bundle(clean_tensors, lang, bot_budget_ratio=ratio)
         poison_tensors = poison_bundle_to_tensors(bundle, clean_tensors["train_mask"])
         poison_model = train_gcn(poison_tensors, device, f"poison_{ratio:.2f}", **gcn_kw)
         poison_test = evaluate_gcn(poison_model, poison_tensors, device)["test"]

@@ -9,7 +9,7 @@ TWITCH_LANG: str = "EN"
 VICTIM_RATIO: float = 0.2
 FOLLOWERS_PER_VICTIM: int | None = None
 MAX_FOLLOWERS_AT_FULL_BUDGET: int = 30
-INJECTED_EDGE_BUDGET_RATIO: float = 1
+BOT_BUDGET_RATIO: float = 1
 VICTIM_SELECTION: str = "random"
 ATTACK_SEED: int = 42
 FOLLOWER_INTRA_RING: bool = True # 组内连边
@@ -26,11 +26,17 @@ def clean_twitch_dir(lang: str) -> Path:
     return project_root() / "dataset" / "clean" / f"twitch_{lang}"
 
 
-def poisoned_twitch_dir(lang: str, budget_ratio: float | None = None) -> Path:
+def poisoned_twitch_dir(lang: str, bot_budget_ratio: float | None = None) -> Path:
     base = project_root() / "dataset" / "poisoned" / f"twitch_{lang}"
-    if budget_ratio is None:
+    if bot_budget_ratio is None:
         return base
-    tag = f"budget_{budget_ratio:.4f}".replace(".", "p")
+    tag = f"bot_budget_{bot_budget_ratio:.4f}".replace(".", "p")
+    return base / tag
+
+
+def legacy_poisoned_twitch_dir(lang: str, bot_budget_ratio: float) -> Path:
+    base = project_root() / "dataset" / "poisoned" / f"twitch_{lang}"
+    tag = f"budget_{bot_budget_ratio:.4f}".replace(".", "p")
     return base / tag
 
 
@@ -103,13 +109,13 @@ def _select_victims(
 
 
 def _followers_per_victim_from_budget(
-    injected_edge_budget_ratio: float,
+    bot_budget_ratio: float,
     followers_per_victim: int | None,
     max_followers_at_full_budget: int = MAX_FOLLOWERS_AT_FULL_BUDGET,
 ) -> int:
     if followers_per_victim is not None and followers_per_victim > 0:
         return followers_per_victim
-    ratio = min(1.0, max(0.0, injected_edge_budget_ratio))
+    ratio = min(1.0, max(0.0, bot_budget_ratio))
     return max(1, int(round(max_followers_at_full_budget * ratio)))
 
 
@@ -184,13 +190,13 @@ def inject_topology_attack(
     follower_intra_random_pair_count: int,
     bot_feature_std: float,
     attack_splits: tuple[str, ...],
-    injected_edge_budget_ratio: float = 1,
+    bot_budget_ratio: float = 1,
     victim_selection: str = "low_degree",
 ) -> dict[str, torch.Tensor]:
     if victim_ratio <= 0 or victim_ratio > 1:
         raise ValueError("victim_ratio must be in (0, 1].")
-    if injected_edge_budget_ratio <= 0:
-        raise ValueError("injected_edge_budget_ratio must be positive.")
+    if bot_budget_ratio <= 0:
+        raise ValueError("bot_budget_ratio must be positive.")
     if victim_selection not in {"random", "low_degree"}:
         raise ValueError("victim_selection must be 'random' or 'low_degree'.")
 
@@ -220,7 +226,7 @@ def inject_topology_attack(
         device,
     )
     k_per_victim = _followers_per_victim_from_budget(
-        injected_edge_budget_ratio,
+        bot_budget_ratio,
         followers_per_victim,
     )
     injected_blocks: list[torch.Tensor] = []
@@ -317,7 +323,13 @@ def inject_topology_attack(
         "test_mask": test_ext,
         "num_original_nodes": num_nodes,
         "followers_per_victim": k_per_victim,
-        "injected_edge_budget_ratio": injected_edge_budget_ratio,
+        "bot_budget_ratio": bot_budget_ratio,
+        "attack_seed": seed,
+        "victim_ratio": victim_ratio,
+        "attack_splits": tuple(attack_splits),
+        "bot_feature_std": bot_feature_std,
+        "follower_intra_ring": follower_intra_ring,
+        "follower_intra_random_pair_count": follower_intra_random_pair_count,
         "victim_selection": victim_selection,
         "max_followers_at_full_budget": MAX_FOLLOWERS_AT_FULL_BUDGET,
     }
@@ -349,11 +361,11 @@ def main() -> int:
         follower_intra_random_pair_count=FOLLOWER_INTRA_RANDOM_PAIR_COUNT,
         bot_feature_std=BOT_FEATURE_STD,
         attack_splits=ATTACK_SPLITS,
-        injected_edge_budget_ratio=INJECTED_EDGE_BUDGET_RATIO,
+        bot_budget_ratio=BOT_BUDGET_RATIO,
         victim_selection=VICTIM_SELECTION,
     )
 
-    out_dir = poisoned_twitch_dir(lang, INJECTED_EDGE_BUDGET_RATIO)
+    out_dir = poisoned_twitch_dir(lang, BOT_BUDGET_RATIO)
     out_dir.mkdir(parents=True, exist_ok=True)
     graph_path = out_dir / "poisoned_graph.pt"
     edge_only_path = out_dir / "poisoned_edge_index.pt"
@@ -366,10 +378,11 @@ def main() -> int:
             "seed": ATTACK_SEED,
             "victim_ratio": VICTIM_RATIO,
             "followers_per_victim": bundle.get("followers_per_victim", FOLLOWERS_PER_VICTIM),
-            "injected_edge_budget_ratio": bundle.get(
-                "injected_edge_budget_ratio",
-                INJECTED_EDGE_BUDGET_RATIO,
+            "bot_budget_ratio": bundle.get(
+                "bot_budget_ratio",
+                bundle.get("injected_edge_budget_ratio", BOT_BUDGET_RATIO),
             ),
+            "attack_seed": bundle.get("attack_seed", ATTACK_SEED),
             "victim_selection": bundle.get("victim_selection", VICTIM_SELECTION),
             "max_followers_at_full_budget": bundle.get(
                 "max_followers_at_full_budget",
@@ -391,7 +404,7 @@ def main() -> int:
     )
 
     print(f"Language: {lang}")
-    print(f"Budget ratio: {INJECTED_EDGE_BUDGET_RATIO}")
+    print(f"Bot budget ratio: {BOT_BUDGET_RATIO}")
     print(f"Followers per victim: {bundle.get('followers_per_victim')}")
     print(f"Victim selection: {VICTIM_SELECTION}")
     print(f"Victims: {int(bundle['victims'].numel())}")

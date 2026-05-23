@@ -35,6 +35,7 @@ def build_supervision(
     teacher: nn.Module | None,
     x: torch.Tensor,
     edge_index: torch.Tensor,
+    edge_jaccard: torch.Tensor | None = None,
     pseudo_confidence: float = PSEUDO_CONFIDENCE,
     transductive_pseudo: bool = False,
 ) -> SupervisionTargets:
@@ -51,7 +52,14 @@ def build_supervision(
 
     teacher.eval()
     with torch.no_grad():
-        logits = teacher(x, edge_index)
+        if edge_jaccard is None:
+            from utils.topology_priors import compute_edge_jaccard
+
+            edge_jaccard = compute_edge_jaccard(edge_index, int(x.size(0)))
+        try:
+            logits = teacher(x, edge_index, edge_jaccard)
+        except TypeError:
+            logits = teacher(x, edge_index)
         probs = F.softmax(logits, dim=1)
         max_probs, preds = probs.max(dim=1)
 

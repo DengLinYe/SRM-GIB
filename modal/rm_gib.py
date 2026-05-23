@@ -5,7 +5,8 @@ from torch import nn
 from torch.nn import functional as F
 from torch_geometric.nn import GCNConv
 
-class GIB_GCN(nn.Module):
+
+class RM_GIB(nn.Module):
     def __init__(
         self,
         in_channels: int,
@@ -15,7 +16,7 @@ class GIB_GCN(nn.Module):
         temperature: float = 1.0,
         prior_keep_rate: float = 0.5,
         beta_n: float = 0.05,
-        beta_x: float = 0.001, 
+        beta_x: float = 0.001,
         hard_threshold: float | None = None,
     ) -> None:
         super().__init__()
@@ -41,7 +42,7 @@ class GIB_GCN(nn.Module):
         self.encoder = GCNConv(hidden_channels, hidden_channels)
         self.bn_enc = nn.BatchNorm1d(hidden_channels)
         self.classifier = GCNConv(hidden_channels, out_channels)
-        
+
         self.dropout = dropout
         self.temperature = temperature
         self.prior_keep_rate = prior_keep_rate
@@ -64,10 +65,9 @@ class GIB_GCN(nn.Module):
         edge_weight: torch.Tensor | None = None,
         return_info: bool = False,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        
         mu = self.bn_mu(self.mu_proj(x))
         logstd = self.logstd_proj(x).clamp(-20, 2)
-        
+
         if self.training:
             std = torch.exp(0.5 * logstd)
             eps = torch.randn_like(std)
@@ -122,19 +122,6 @@ class GIB_GCN(nn.Module):
         p = edge_prob.clamp(eps, 1 - eps)
         r = torch.as_tensor(self.prior_keep_rate, dtype=p.dtype, device=p.device)
         return (p * torch.log(p / r) + (1 - p) * torch.log((1 - p) / (1 - r))).mean()
-
-    def total_loss(
-        self,
-        logits: torch.Tensor,
-        y: torch.Tensor,
-        mask: torch.Tensor,
-        edge_prob: torch.Tensor,
-        kl_loss_x: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        ce_loss = F.cross_entropy(logits[mask], y[mask])
-        kl_n = self.kl_loss_n(edge_prob)
-        total = ce_loss + self.beta_n * kl_n + self.beta_x * kl_loss_x
-        return total, ce_loss, kl_n, kl_loss_x
 
     @staticmethod
     def gumbel_sigmoid(edge_prob: torch.Tensor, temperature: float) -> torch.Tensor:
