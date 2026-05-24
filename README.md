@@ -29,7 +29,7 @@ SR-GIB/
 │   ├── topology_attack.py   # 图注入攻击方法
 │   └── graph_utils.py       # 特征归一化等图工具函数
 │
-├── modal/                   # 模型定义
+├── model/                   # 模型定义
 │   ├── gcn.py               # Vanilla GCN 基线
 │   ├── rm_gib.py            # RM-GIB
 │   └── srm_gib.py           # SR-GIB
@@ -50,7 +50,7 @@ SR-GIB/
 
 `\data`目录下是数据处理模块，主要是读取数据源并处理，以及数据投毒（攻击方法）
 
-`\modal`就是模型文件，分别是两个基线（GCN、RM-GIB）和主要方法（SR-GIB）的模型定义。
+`\model`就是模型文件，分别是两个基线（GCN、RM-GIB）和主要方法（SR-GIB）的模型定义。
 
 `\utils`是一些公用函数等。
 

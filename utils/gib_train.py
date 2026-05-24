@@ -4,8 +4,8 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
-from modal.rm_gib import RM_GIB
-from modal.srm_gib import GIB_GCN
+from model.rm_gib import RM_GIB
+from model.srm_gib import GIB_GCN
 from utils.config import (
     DROPOUT,
     EPOCHS,

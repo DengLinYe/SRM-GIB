@@ -3,7 +3,7 @@ from __future__ import annotations
 import torch
 from torch.nn import functional as F
 
-from modal.gcn import VanillaGCN
+from model.gcn import VanillaGCN
 from utils.config import (
     DROPOUT,
     EPOCHS,
